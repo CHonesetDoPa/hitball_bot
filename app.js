@@ -81,6 +81,70 @@ class HitDataManager {
 // 创建数据管理器实例
 const dataManager = new HitDataManager();
 
+// 速率限制管理器
+class RateLimitManager {
+    constructor() {
+        this.userCooldowns = new Map(); // 存储用户冷却时间
+        this.hitCooldown = parseInt(process.env.HIT_COOLDOWN) || 3000; // /hit 命令冷却时间 (默认3秒)
+        this.commandCooldown = parseInt(process.env.COMMAND_COOLDOWN) || 1000; // 其他命令冷却时间 (默认1秒)
+    }
+
+    // 检查用户是否在冷却期
+    isOnCooldown(userId, commandType = 'command') {
+        const cooldownTime = commandType === 'hit' ? this.hitCooldown : this.commandCooldown;
+        const userKey = `${userId}_${commandType}`;
+        
+        if (!this.userCooldowns.has(userKey)) {
+            return false;
+        }
+
+        const lastUse = this.userCooldowns.get(userKey);
+        const timePassed = Date.now() - lastUse;
+        
+        return timePassed < cooldownTime;
+    }
+
+    // 获取剩余冷却时间
+    getRemainingCooldown(userId, commandType = 'command') {
+        const cooldownTime = commandType === 'hit' ? this.hitCooldown : this.commandCooldown;
+        const userKey = `${userId}_${commandType}`;
+        
+        if (!this.userCooldowns.has(userKey)) {
+            return 0;
+        }
+
+        const lastUse = this.userCooldowns.get(userKey);
+        const timePassed = Date.now() - lastUse;
+        const remaining = cooldownTime - timePassed;
+        
+        return remaining > 0 ? Math.ceil(remaining / 1000) : 0;
+    }
+
+    // 设置用户冷却
+    setCooldown(userId, commandType = 'command') {
+        const userKey = `${userId}_${commandType}`;
+        this.userCooldowns.set(userKey, Date.now());
+        
+        // 清理过期的冷却记录
+        this.cleanupExpiredCooldowns();
+    }
+
+    // 清理过期的冷却记录
+    cleanupExpiredCooldowns() {
+        const now = Date.now();
+        const maxCooldown = Math.max(this.hitCooldown, this.commandCooldown);
+        
+        for (const [key, timestamp] of this.userCooldowns.entries()) {
+            if (now - timestamp > maxCooldown) {
+                this.userCooldowns.delete(key);
+            }
+        }
+    }
+}
+
+// 创建速率限制管理器实例
+const rateLimitManager = new RateLimitManager();
+
 // 工具函数
 function escapeMarkdown(text) {
     return text.replace(/[_*[\]()~`>#+=|{}.!-]/g, '\\$&');
@@ -217,6 +281,17 @@ bot.on('polling_error', (error) => {
 // 启动命令
 bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
+    
+    // 检查群聊限制
+    if (!checkGroupCommandRestriction(msg, '/start')) {
+        return;
+    }
+    
+    // 检查速率限制
+    if (!checkRateLimit(msg, 'command')) {
+        return;
+    }
+    
     const welcomeMessage = `
 🎮 **欢迎使用击打高玩机器人！** 
 
@@ -233,8 +308,13 @@ bot.onText(/\/start/, async (msg) => {
 🎲 随机高玩击打效果 | 🏆 高玩受击排行榜 | 🎖️ 高玩成就解锁
 📊 详细高玩受击统计 | 🎊 高玩里程碑庆祝 | 💾 数据永久保存
 
+**⚡ 智能限制：**
+• 速率限制防刷屏 | 🔒 群聊仅限击打命令 | 🛡️ 私聊无限制
+
 **💡 小贴士：**
-在群组中使用效果更佳，快邀请朋友一起来击打高玩吧！
+• 群聊中只能使用 \`/hit\` 命令，其他功能请私聊机器人
+• 击打有3秒冷却，其他命令有1秒冷却
+• 在群组中使用效果更佳，快邀请朋友一起来击打高玩吧！
 
 发送 \`/help\` 获取完整使用指南。
 
@@ -247,6 +327,17 @@ bot.onText(/\/start/, async (msg) => {
 // 帮助命令
 bot.onText(/\/help/, async (msg) => {
     const chatId = msg.chat.id;
+    
+    // 检查群聊限制
+    if (!checkGroupCommandRestriction(msg, '/help')) {
+        return;
+    }
+    
+    // 检查速率限制
+    if (!checkRateLimit(msg, 'command')) {
+        return;
+    }
+    
     const helpMessage = `
 🆘 **击打高玩机器人完整指南**
 
@@ -266,6 +357,11 @@ bot.onText(/\/help/, async (msg) => {
 **ℹ️ 其他命令：**
 \`/start\` - 开始使用机器人
 \`/help\` - 显示此帮助信息
+
+**⚡ 使用限制：**
+• 击打命令冷却：3秒 (防止刷屏)
+• 其他命令冷却：1秒 (防止频繁请求)
+• 群聊限制：只能使用 \`/hit\` 命令，其他命令请私聊机器人
 
 **🎯 击打高玩方式：**
 1️⃣ **回复消息击打高玩：** 回复某人的消息，然后发送 \`/hit\`
@@ -296,6 +392,11 @@ bot.onText(/\/hit(.*)/, async (msg, match) => {
     const chatId = msg.chat.id;
     const attacker = msg.from;
     const commandText = match[1] || ''; // 获取/hit后面的内容
+
+    // 检查速率限制 (击打命令有更长的冷却时间)
+    if (!checkRateLimit(msg, 'hit')) {
+        return;
+    }
 
     try {
         // 解析击打高玩目标
@@ -373,6 +474,16 @@ bot.onText(/\/stats(.*)/, async (msg, match) => {
     let targetUsername = null;
     let targetDisplayName = null;
 
+    // 检查群聊限制
+    if (!checkGroupCommandRestriction(msg, '/stats')) {
+        return;
+    }
+    
+    // 检查速率限制
+    if (!checkRateLimit(msg, 'command')) {
+        return;
+    }
+
     try {
         // 检查是否指定了用户名
         const atUserMatch = commandText.match(/@(\w+)/);
@@ -446,6 +557,16 @@ ${statusEmoji} **状态：** ${statusText}
 // 排行榜命令
 bot.onText(/\/leaderboard/, async (msg) => {
     const chatId = msg.chat.id;
+    
+    // 检查群聊限制
+    if (!checkGroupCommandRestriction(msg, '/leaderboard')) {
+        return;
+    }
+    
+    // 检查速率限制
+    if (!checkRateLimit(msg, 'command')) {
+        return;
+    }
     
     try {
         const leaderboard = dataManager.getLeaderboard(10);
@@ -533,6 +654,16 @@ bot.onText(/\/achievements(.*)/, async (msg, match) => {
     let targetUsername = null;
     let targetDisplayName = null;
 
+    // 检查群聊限制
+    if (!checkGroupCommandRestriction(msg, '/achievements')) {
+        return;
+    }
+    
+    // 检查速率限制
+    if (!checkRateLimit(msg, 'command')) {
+        return;
+    }
+
     try {
         // 检查是否指定了用户名
         const atUserMatch = commandText.match(/@(\w+)/);
@@ -613,6 +744,89 @@ bot.onText(/\/achievements(.*)/, async (msg, match) => {
         console.error('❌ 处理高玩成就命令时出错:', error);
         bot.sendMessage(chatId, '❌ 获取高玩成就信息失败，请稍后重试！');
     }
+});
+
+// 检查是否为群聊
+function isGroupChat(chatType) {
+    return chatType === 'group' || chatType === 'supergroup';
+}
+
+// 群聊命令限制检查
+function checkGroupCommandRestriction(msg, commandName) {
+    if (isGroupChat(msg.chat.type) && commandName !== '/hit') {
+        const botUsername = process.env.BOT_USERNAME || 'hitball_bot';
+        const restrictedMessage = `🚫 **群聊限制**
+
+为了保持群聊的简洁，在群聊中只能使用 \`/hit\` 命令。
+
+**其他命令请私聊机器人使用：**
+• \`/stats\` - 查看击打统计
+• \`/leaderboard\` - 查看排行榜  
+• \`/achievements\` - 查看成就
+• \`/help\` - 获取帮助
+
+💬 **开始私聊：** 点击 [@${botUsername}](https://t.me/${botUsername}) 或搜索机器人用户名！`;
+        
+        bot.sendMessage(msg.chat.id, restrictedMessage, { 
+            parse_mode: 'Markdown',
+            disable_web_page_preview: true 
+        });
+        return false;
+    }
+    return true;
+}
+
+// 速率限制检查
+function checkRateLimit(msg, commandType = 'command') {
+    const userId = msg.from.id;
+    
+    if (rateLimitManager.isOnCooldown(userId, commandType)) {
+        const remaining = rateLimitManager.getRemainingCooldown(userId, commandType);
+        const cooldownMessage = commandType === 'hit' 
+            ? `⏰ **击打冷却中**\n\n请等待 **${remaining}** 秒后再次击打高玩！\n\n*为了防止刷屏，击打命令有3秒冷却时间*`
+            : `⏰ **命令冷却中**\n\n请等待 **${remaining}** 秒后再次使用命令！`;
+        
+        bot.sendMessage(msg.chat.id, cooldownMessage, { parse_mode: 'Markdown' });
+        return false;
+    }
+    
+    rateLimitManager.setCooldown(userId, commandType);
+    return true;
+}
+
+// 管理员命令 - 查看速率限制状态（调试用）
+bot.onText(/\/ratelimit/, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    
+    // 检查群聊限制
+    if (!checkGroupCommandRestriction(msg, '/ratelimit')) {
+        return;
+    }
+    
+    const hitCooldown = rateLimitManager.getRemainingCooldown(userId, 'hit');
+    const commandCooldown = rateLimitManager.getRemainingCooldown(userId, 'command');
+    
+    let message = `⏱️ **速率限制状态**\n\n`;
+    message += `👤 **用户：** ${getUserDisplayName(msg.from)}\n\n`;
+    
+    if (hitCooldown > 0) {
+        message += `🎯 **击打冷却：** ${hitCooldown} 秒\n`;
+    } else {
+        message += `🎯 **击打冷却：** ✅ 可用\n`;
+    }
+    
+    if (commandCooldown > 0) {
+        message += `⚙️ **命令冷却：** ${commandCooldown} 秒\n`;
+    } else {
+        message += `⚙️ **命令冷却：** ✅ 可用\n`;
+    }
+    
+    message += `\n📊 **冷却时间设置：**\n`;
+    message += `• 击打命令：${rateLimitManager.hitCooldown / 1000} 秒\n`;
+    message += `• 其他命令：${rateLimitManager.commandCooldown / 1000} 秒`;
+    
+    bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
 });
 
 // 启动机器人
