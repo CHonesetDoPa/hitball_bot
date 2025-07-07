@@ -85,8 +85,12 @@ const dataManager = new HitDataManager();
 class RateLimitManager {
     constructor() {
         this.userCooldowns = new Map(); // 存储用户冷却时间
+        this.userViolations = new Map(); // 存储用户违规次数
         this.hitCooldown = parseInt(process.env.HIT_COOLDOWN) || 3000; // /hit 命令冷却时间 (默认3秒)
         this.commandCooldown = parseInt(process.env.COMMAND_COOLDOWN) || 1000; // 其他命令冷却时间 (默认1秒)
+        this.maxViolations = parseInt(process.env.MAX_VIOLATIONS) || 5; // 最大违规次数 (默认5次)
+        this.muteTime = parseInt(process.env.MUTE_TIME) || 300; // 禁言时间 (默认5分钟)
+        this.violationResetTime = parseInt(process.env.VIOLATION_RESET_TIME) || 60000; // 违规计数重置时间 (默认1分钟)
     }
 
     // 检查用户是否在冷却期
@@ -139,6 +143,59 @@ class RateLimitManager {
                 this.userCooldowns.delete(key);
             }
         }
+    }
+
+    // 记录用户违规
+    recordViolation(userId) {
+        const now = Date.now();
+        
+        if (!this.userViolations.has(userId)) {
+            this.userViolations.set(userId, {
+                count: 1,
+                firstViolation: now,
+                lastViolation: now
+            });
+            return 1;
+        }
+
+        const violation = this.userViolations.get(userId);
+        
+        // 如果距离第一次违规超过重置时间，重置计数
+        if (now - violation.firstViolation > this.violationResetTime) {
+            this.userViolations.set(userId, {
+                count: 1,
+                firstViolation: now,
+                lastViolation: now
+            });
+            return 1;
+        }
+
+        violation.count++;
+        violation.lastViolation = now;
+        return violation.count;
+    }
+
+    // 获取用户违规次数
+    getViolationCount(userId) {
+        if (!this.userViolations.has(userId)) {
+            return 0;
+        }
+
+        const violation = this.userViolations.get(userId);
+        const now = Date.now();
+        
+        // 如果距离第一次违规超过重置时间，返回0
+        if (now - violation.firstViolation > this.violationResetTime) {
+            this.userViolations.delete(userId);
+            return 0;
+        }
+
+        return violation.count;
+    }
+
+    // 重置用户违规记录
+    resetViolations(userId) {
+        this.userViolations.delete(userId);
     }
 }
 
@@ -288,7 +345,7 @@ bot.onText(/\/start/, async (msg) => {
     }
     
     // 检查速率限制
-    if (!checkRateLimit(msg, 'command')) {
+    if (!(await checkRateLimit(msg, 'command'))) {
         return;
     }
     
@@ -334,7 +391,7 @@ bot.onText(/\/help/, async (msg) => {
     }
     
     // 检查速率限制
-    if (!checkRateLimit(msg, 'command')) {
+    if (!(await checkRateLimit(msg, 'command'))) {
         return;
     }
     
@@ -394,7 +451,7 @@ bot.onText(/\/hit(.*)/, async (msg, match) => {
     const commandText = match[1] || ''; // 获取/hit后面的内容
 
     // 检查速率限制 (击打命令有更长的冷却时间)
-    if (!checkRateLimit(msg, 'hit')) {
+    if (!(await checkRateLimit(msg, 'hit'))) {
         return;
     }
 
@@ -480,7 +537,7 @@ bot.onText(/\/stats(.*)/, async (msg, match) => {
     }
     
     // 检查速率限制
-    if (!checkRateLimit(msg, 'command')) {
+    if (!(await checkRateLimit(msg, 'command'))) {
         return;
     }
 
@@ -564,7 +621,7 @@ bot.onText(/\/leaderboard/, async (msg) => {
     }
     
     // 检查速率限制
-    if (!checkRateLimit(msg, 'command')) {
+    if (!(await checkRateLimit(msg, 'command'))) {
         return;
     }
     
@@ -660,7 +717,7 @@ bot.onText(/\/achievements(.*)/, async (msg, match) => {
     }
     
     // 检查速率限制
-    if (!checkRateLimit(msg, 'command')) {
+    if (!(await checkRateLimit(msg, 'command'))) {
         return;
     }
 
@@ -777,16 +834,44 @@ function checkGroupCommandRestriction(msg, commandName) {
 }
 
 // 速率限制检查
-function checkRateLimit(msg, commandType = 'command') {
+async function checkRateLimit(msg, commandType = 'command') {
     const userId = msg.from.id;
+    const chatId = msg.chat.id;
     
     if (rateLimitManager.isOnCooldown(userId, commandType)) {
-        const remaining = rateLimitManager.getRemainingCooldown(userId, commandType);
-        const cooldownMessage = commandType === 'hit' 
-            ? `⏰ **击打冷却中**\n\n请等待 **${remaining}** 秒后再次击打高玩！\n\n*为了防止刷屏，击打命令有3秒冷却时间*`
-            : `⏰ **命令冷却中**\n\n请等待 **${remaining}** 秒后再次使用命令！`;
+        // 记录违规并检查是否需要禁言
+        const violationCount = rateLimitManager.recordViolation(userId);
         
-        bot.sendMessage(msg.chat.id, cooldownMessage, { parse_mode: 'Markdown' });
+        if (violationCount >= rateLimitManager.maxViolations) {
+            // 达到最大违规次数，尝试禁言用户
+            if (isGroupChat(msg.chat.type)) {
+                try {
+                    await bot.restrictChatMember(chatId, userId, {
+                        until_date: Math.floor(Date.now() / 1000) + rateLimitManager.muteTime,
+                        permissions: {
+                            can_send_messages: false,
+                            can_send_media_messages: false,
+                            can_send_polls: false,
+                            can_send_other_messages: false,
+                            can_add_web_page_previews: false,
+                            can_change_info: false,
+                            can_invite_users: false,
+                            can_pin_messages: false
+                        }
+                    });
+                    
+                    console.log(`🔇 用户 ${userId} 因连续违规 ${violationCount} 次被禁言 ${rateLimitManager.muteTime} 秒`);
+                    
+                    // 重置违规计数
+                    rateLimitManager.resetViolations(userId);
+                    
+                } catch (error) {
+                    console.error('❌ 禁言用户失败:', error);
+                    // 如果禁言失败，可能是权限不足，继续执行但记录错误
+                }
+            }
+        }
+        
         return false;
     }
     
