@@ -366,7 +366,7 @@ bot.onText(/\/start/, async (msg) => {
 📊 详细高玩受击统计 | 🎊 高玩里程碑庆祝 | 💾 数据永久保存
 
 **⚡ 智能限制：**
-• 速率限制防刷屏 | 🔒 群聊仅限击打命令 | 🛡️ 私聊无限制
+• 速率限制防刷屏 | 🔒 群聊仅限击打命令 | 🛡️ 私聊无限制 | 🤖 机器人反弹保护
 
 **💡 小贴士：**
 • 群聊中只能使用 \`/hit\` 命令，其他功能请私聊机器人
@@ -419,6 +419,7 @@ bot.onText(/\/help/, async (msg) => {
 • 击打命令冷却：3秒 (防止刷屏)
 • 其他命令冷却：1秒 (防止频繁请求)
 • 群聊限制：只能使用 \`/hit\` 命令，其他命令请私聊机器人
+• 🛡️ 机器人保护：攻击机器人会被反弹，攻击者自己受到伤害
 
 **🎯 击打高玩方式：**
 1️⃣ **回复消息击打高玩：** 回复某人的消息，然后发送 \`/hit\`
@@ -437,6 +438,7 @@ bot.onText(/\/help/, async (msg) => {
 • 可以击打任何有用户名用户的高玩
 • 高玩受击数据会永久保存
 • 支持多种用户选择方式
+• ⚠️ **注意：** 不要试图攻击机器人，所有攻击都会反弹到你自己身上！
 
 开始你的高玩击打之旅吧！💪🎯
     `;
@@ -490,6 +492,43 @@ bot.onText(/\/hit(.*)/, async (msg, match) => {
             ];
             const randomMessage = selfHitMessages[Math.floor(Math.random() * selfHitMessages.length)];
             bot.sendMessage(chatId, randomMessage);
+            return;
+        }
+
+        // 检查是否试图攻击机器人并实现反弹
+        const botInfo = await bot.getMe();
+        if (target.id === botInfo.id || (target.username && target.username === botInfo.username)) {
+            // 攻击反弹 - 攻击者成为被攻击目标
+            const attackerUsername = attacker.username ? `@${attacker.username}` : `user_${attacker.id}`;
+            const attackerDisplayName = getUserDisplayName(attacker);
+            
+            const hitCount = await dataManager.hitUser(attackerUsername, attackerDisplayName);
+            
+            const bounceMessages = [
+                '🛡️ **攻击反弹！** 机器人启动了防护系统！',
+                '⚡ **反击启动！** 你以为机器人那么好欺负？',
+                '🔄 **攻击反弹！** 机器人的高玩受到了神圣保护！',
+                '💫 **反弹伤害！** 机器人反击了你的攻击！',
+                '🌀 **能量反射！** 你的攻击被完美反弹！'
+            ];
+            
+            const randomBounceMessage = bounceMessages[Math.floor(Math.random() * bounceMessages.length)];
+            
+            // 根据高玩击打次数添加特殊效果
+            let specialEffect = '';
+            if (hitCount === 1) {
+                specialEffect = '\n🎊 **首次反弹攻击！** 你成为了第一个被机器人反击的人！';
+            } else if (hitCount % 5 === 0) {
+                specialEffect = `\n⚡ **反弹连击！** 这是第 ${hitCount} 次被机器人反击！`;
+            } else if (hitCount >= 10) {
+                specialEffect = '\n🤖 **机器人克星！** 你已经被机器人反击很多次了，要不要考虑和解？';
+            }
+
+            const bounceMessage = `${randomBounceMessage}\n\n💥 ${attackerDisplayName} 试图攻击机器人，结果被反弹击中了自己的高玩！\n\n📊 ${attackerDisplayName} 的高玩已被反弹击打 **${hitCount}** 次！${specialEffect}`;
+            
+            bot.sendMessage(chatId, bounceMessage, { parse_mode: 'Markdown' });
+            
+            console.log(`🛡️ ${attackerDisplayName} 试图攻击机器人，攻击被反弹 (第${hitCount}次)`);
             return;
         }
 
