@@ -19,6 +19,7 @@ class HitDataManager {
     constructor() {
         this.data = {
             hitData: {},
+            bounceAchievements: {}, // 反击成就记录
             lastUpdated: new Date().toISOString()
         };
     }
@@ -75,6 +76,30 @@ class HitDataManager {
             .slice(0, limit);
         
         return sortedUsers;
+    }
+
+    // 记录反击成就
+    async recordBounceAchievement(username, displayName) {
+        if (!this.data.bounceAchievements) {
+            this.data.bounceAchievements = {};
+        }
+        
+        if (!this.data.bounceAchievements[username]) {
+            this.data.bounceAchievements[username] = {
+                name: displayName || username,
+                hasBounceAchievement: true,
+                firstBounceDate: new Date().toISOString()
+            };
+            await this.saveData();
+            return true; // 首次反击
+        }
+        
+        return false; // 已经有反击成就
+    }
+
+    // 检查用户是否有反击成就
+    hasBounceAchievement(username) {
+        return this.data.bounceAchievements?.[username]?.hasBounceAchievement || false;
     }
 }
 
@@ -502,6 +527,10 @@ bot.onText(/\/hit(.*)/, async (msg, match) => {
             const attackerUsername = attacker.username ? `@${attacker.username}` : `user_${attacker.id}`;
             const attackerDisplayName = getUserDisplayName(attacker);
             
+            // 记录反击成就（如果是首次）
+            const isFirstBounce = await dataManager.recordBounceAchievement(attackerUsername, attackerDisplayName);
+            
+            // 正常击打攻击者
             const hitCount = await dataManager.hitUser(attackerUsername, attackerDisplayName);
             
             const bounceMessages = [
@@ -514,21 +543,19 @@ bot.onText(/\/hit(.*)/, async (msg, match) => {
             
             const randomBounceMessage = bounceMessages[Math.floor(Math.random() * bounceMessages.length)];
             
-            // 根据高玩击打次数添加特殊效果
+            // 根据是否首次反击添加特殊效果
             let specialEffect = '';
-            if (hitCount === 1) {
-                specialEffect = '\n🎊 **首次反弹攻击！** 你成为了第一个被机器人反击的人！';
-            } else if (hitCount % 5 === 0) {
-                specialEffect = `\n⚡ **反弹连击！** 这是第 ${hitCount} 次被机器人反击！`;
-            } else if (hitCount >= 10) {
-                specialEffect = '\n🤖 **机器人克星！** 你已经被机器人反击很多次了，要不要考虑和解？';
+            if (isFirstBounce) {
+                specialEffect = '\n🎊 **首次反弹攻击！** 你解锁了"机器人挑战者"成就！';
+            } else if (hitCount % 10 === 0) {
+                specialEffect = `\n🏆 **里程碑击打！** 这是第 ${hitCount} 次高玩击打！`;
             }
 
-            const bounceMessage = `${randomBounceMessage}\n\n💥 ${attackerDisplayName} 试图攻击机器人，结果被反弹击中了自己的高玩！\n\n📊 ${attackerDisplayName} 的高玩已被反弹击打 **${hitCount}** 次！${specialEffect}`;
+            const bounceMessage = `${randomBounceMessage}\n\n💥 ${attackerDisplayName} 试图攻击机器人，结果被反弹击中了自己的高玩！\n\n📊 ${attackerDisplayName} 的高玩已被击打 **${hitCount}** 次！${specialEffect}`;
             
             bot.sendMessage(chatId, bounceMessage, { parse_mode: 'Markdown' });
             
-            console.log(`🛡️ ${attackerDisplayName} 试图攻击机器人，攻击被反弹 (第${hitCount}次)`);
+            console.log(`🛡️ ${attackerDisplayName} 试图攻击机器人，攻击被反弹 (第${hitCount}次击打${isFirstBounce ? '，首次反击' : ''})`);
             return;
         }
 
@@ -810,6 +837,11 @@ bot.onText(/\/achievements(.*)/, async (msg, match) => {
         if (userRank === 2) achievements.push('🥈 高玩二号目标 - 高玩受击排行榜第二');
         if (userRank === 3) achievements.push('🥉 铜牌高玩受击王 - 高玩受击排行榜第三');
         if (userRank > 0 && userRank <= 10) achievements.push('🏅 高玩前十常客 - 进入高玩受击排行榜前10名');
+        
+        // 检查反击成就
+        if (dataManager.hasBounceAchievement(targetUsername)) {
+            achievements.push('🛡️ 机器人挑战者 - 试图攻击机器人但被反弹');
+        }
 
         let message = `🏆 **高玩受击成就报告**\n\n`;
         message += `👤 **目标：** ${escapeMarkdown(targetDisplayName)}\n`;
