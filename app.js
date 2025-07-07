@@ -18,8 +18,8 @@ const dataFilePath = path.join(__dirname, 'data.json');
 class HitDataManager {
     constructor() {
         this.data = {
-            hitData: {},
-            bounceAchievements: {}, // 反击成就记录
+            hitData: {}, // 现在使用用户ID作为键
+            bounceAchievements: {}, // 反击成就记录，也使用用户ID作为键
             lastUpdated: new Date().toISOString()
         };
     }
@@ -50,26 +50,35 @@ class HitDataManager {
         }
     }
 
-    // 击打高玩用户
-    async hitUser(username, displayName) {
-        if (!this.data.hitData[username]) {
-            this.data.hitData[username] = {
-                name: displayName || username,
-                count: 0
+    // 击打高玩用户 - 使用用户ID作为主键
+    async hitUser(userId, displayName, username = null) {
+        if (!this.data.hitData[userId]) {
+            this.data.hitData[userId] = {
+                name: displayName || `用户${userId}`,
+                username: username,
+                count: 0,
+                firstHitDate: new Date().toISOString()
             };
+        } else {
+            // 更新显示名称和用户名（如果提供的话）
+            this.data.hitData[userId].name = displayName || this.data.hitData[userId].name;
+            if (username) {
+                this.data.hitData[userId].username = username;
+            }
         }
         
-        this.data.hitData[username].count++;
+        this.data.hitData[userId].count++;
+        this.data.hitData[userId].lastHitDate = new Date().toISOString();
         await this.saveData();
-        return this.data.hitData[username].count;
+        return this.data.hitData[userId].count;
     }
 
-    // 获取用户高玩击打次数
-    getUserHitCount(username) {
-        return this.data.hitData[username]?.count || 0;
+    // 获取用户高玩击打次数 - 使用用户ID
+    getUserHitCount(userId) {
+        return this.data.hitData[userId]?.count || 0;
     }
 
-    // 获取排行榜
+    // 获取排行榜 - 返回格式调整为使用用户ID
     getLeaderboard(limit = 10) {
         const sortedUsers = Object.entries(this.data.hitData)
             .sort(([,a], [,b]) => b.count - a.count)
@@ -78,15 +87,16 @@ class HitDataManager {
         return sortedUsers;
     }
 
-    // 记录反击成就
-    async recordBounceAchievement(username, displayName) {
+    // 记录反击成就 - 使用用户ID
+    async recordBounceAchievement(userId, displayName, username = null) {
         if (!this.data.bounceAchievements) {
             this.data.bounceAchievements = {};
         }
         
-        if (!this.data.bounceAchievements[username]) {
-            this.data.bounceAchievements[username] = {
-                name: displayName || username,
+        if (!this.data.bounceAchievements[userId]) {
+            this.data.bounceAchievements[userId] = {
+                name: displayName || `用户${userId}`,
+                username: username,
                 hasBounceAchievement: true,
                 firstBounceDate: new Date().toISOString()
             };
@@ -97,9 +107,90 @@ class HitDataManager {
         return false; // 已经有反击成就
     }
 
-    // 检查用户是否有反击成就
-    hasBounceAchievement(username) {
-        return this.data.bounceAchievements?.[username]?.hasBounceAchievement || false;
+    // 检查用户是否有反击成就 - 使用用户ID
+    hasBounceAchievement(userId) {
+        return this.data.bounceAchievements?.[userId]?.hasBounceAchievement || false;
+    }
+
+    // 通过用户名查找用户ID
+    findUserIdByUsername(username) {
+        const cleanUsername = username.toLowerCase().replace('@', '');
+        for (const [userId, userData] of Object.entries(this.data.hitData)) {
+            if (userData.username && userData.username.toLowerCase() === cleanUsername) {
+                return userId;
+            }
+        }
+        return null;
+    }
+
+    // 同步用户信息（ID和用户名映射）
+    async syncUserInfo(userId, displayName, username = null) {
+        let needsSave = false;
+        
+        // 确保用户记录存在
+        if (!this.data.hitData[userId]) {
+            this.data.hitData[userId] = {
+                name: displayName || `用户${userId}`,
+                username: username,
+                count: 0,
+                firstHitDate: new Date().toISOString()
+            };
+            needsSave = true;
+        } else {
+            // 更新显示名称
+            if (displayName && this.data.hitData[userId].name !== displayName) {
+                this.data.hitData[userId].name = displayName;
+                needsSave = true;
+            }
+            
+            // 更新用户名
+            if (username && this.data.hitData[userId].username !== username) {
+                this.data.hitData[userId].username = username;
+                needsSave = true;
+            }
+        }
+        
+        if (needsSave) {
+            await this.saveData();
+        }
+        
+        return this.data.hitData[userId];
+    }
+
+    // 通过API获取并同步群组成员信息
+    async syncChatMemberInfo(chatId, userId) {
+        try {
+            const member = await bot.getChatMember(chatId, userId);
+            if (member && member.user) {
+                const user = member.user;
+                const displayName = getUserDisplayName(user);
+                const username = user.username || null;
+                
+                return await this.syncUserInfo(userId.toString(), displayName, username);
+            }
+        } catch (error) {
+            console.log(`⚠️ 无法获取用户 ${userId} 的群组成员信息:`, error.message);
+        }
+        return null;
+    }
+
+    // 批量同步群组成员信息
+    async syncAllChatMembers(chatId) {
+        const syncedCount = 0;
+        const userIds = Object.keys(this.data.hitData);
+        
+        console.log(`🔄 开始同步 ${userIds.length} 个用户的群组信息...`);
+        
+        for (const userId of userIds) {
+            try {
+                await this.syncChatMemberInfo(chatId, parseInt(userId));
+                await new Promise(resolve => setTimeout(resolve, 100)); // 避免API限制
+            } catch (error) {
+                console.log(`⚠️ 同步用户 ${userId} 信息失败:`, error.message);
+            }
+        }
+        
+        console.log(`✅ 群组成员信息同步完成`);
     }
 }
 
@@ -244,19 +335,77 @@ function getUserDisplayName(user) {
     }
 }
 
-// 通过用户名获取用户信息
-async function getUserByUsername(username) {
+// 通过用户名或ID获取用户信息
+async function getUserInfo(chatId, identifier) {
     try {
-        // 移除@符号
-        const cleanUsername = username.replace('@', '');
+        let userId = null;
+        let userInfo = null;
         
-        // 这里可以通过Telegram API获取用户信息，但需要用户先与机器人互动
-        // 暂时返回基础信息，实际项目中可以维护一个用户数据库
+        // 如果是纯数字，认为是用户ID
+        if (/^\d+$/.test(identifier)) {
+            userId = parseInt(identifier);
+        } else {
+            // 否则认为是用户名，先查找对应的用户ID
+            const cleanUsername = identifier.replace('@', '');
+            userId = dataManager.findUserIdByUsername(cleanUsername);
+            
+            if (!userId) {
+                // 如果没找到，返回基础信息，等待用户互动时同步
+                return {
+                    id: null,
+                    username: cleanUsername,
+                    display_name: `@${cleanUsername}`,
+                    exists: false
+                };
+            }
+            userId = parseInt(userId);
+        }
+        
+        // 尝试通过API获取最新的用户信息
+        try {
+            const member = await bot.getChatMember(chatId, userId);
+            if (member && member.user) {
+                const user = member.user;
+                userInfo = {
+                    id: user.id,
+                    username: user.username,
+                    display_name: getUserDisplayName(user),
+                    exists: true
+                };
+                
+                // 同步到数据管理器
+                await dataManager.syncUserInfo(
+                    user.id.toString(), 
+                    userInfo.display_name, 
+                    user.username
+                );
+                
+                console.log(`✅ 通过API获取用户信息: ${userInfo.display_name} (ID: ${user.id})`);
+                return userInfo;
+            }
+        } catch (apiError) {
+            console.log(`⚠️ API获取用户信息失败: ${apiError.message}`);
+        }
+        
+        // 如果API获取失败，从本地数据查找
+        const userData = dataManager.data.hitData[userId.toString()];
+        if (userData) {
+            return {
+                id: userId,
+                username: userData.username,
+                display_name: userData.name,
+                exists: true
+            };
+        }
+        
+        // 都没找到，返回基础信息
         return {
-            username: cleanUsername,
-            display_name: `@${cleanUsername}`,
-            exists: true // 假设用户存在，实际可以通过API验证
+            id: userId,
+            username: null,
+            display_name: `用户${userId}`,
+            exists: false
         };
+        
     } catch (error) {
         console.error('获取用户信息时出错:', error);
         return null;
@@ -266,65 +415,102 @@ async function getUserByUsername(username) {
 // 解析击打高玩目标
 async function parseHitTarget(message, commandText) {
     let target = null;
-    let targetUsername = null;
+    let targetUserId = null;
     let targetDisplayName = null;
+    const chatId = message.chat.id;
 
     // 方式1: 检查是否回复了某人的消息
     if (message.reply_to_message && message.reply_to_message.from) {
         const replyUser = message.reply_to_message.from;
         target = replyUser;
-        targetUsername = replyUser.username ? `@${replyUser.username}` : `user_${replyUser.id}`;
+        targetUserId = replyUser.id.toString();
         targetDisplayName = getUserDisplayName(replyUser);
         
-        console.log(`🎯 通过回复消息选择目标: ${targetDisplayName}`);
-        return { target, targetUsername, targetDisplayName };
+        // 自动同步用户信息
+        await dataManager.syncUserInfo(targetUserId, targetDisplayName, replyUser.username);
+        
+        console.log(`🎯 通过回复消息选择目标: ${targetDisplayName} (ID: ${targetUserId})`);
+        return { target, targetUserId, targetDisplayName };
     }
 
-    // 方式2: 解析命令中的@用户名
+    // 方式2: 检查是否转发了某人的消息
+    if (message.forward_from) {
+        const forwardUser = message.forward_from;
+        target = forwardUser;
+        targetUserId = forwardUser.id.toString();
+        targetDisplayName = getUserDisplayName(forwardUser);
+        
+        // 自动同步用户信息
+        await dataManager.syncUserInfo(targetUserId, targetDisplayName, forwardUser.username);
+        
+        console.log(`🎯 通过转发消息选择目标: ${targetDisplayName} (ID: ${targetUserId})`);
+        return { target, targetUserId, targetDisplayName };
+    }
+
+    // 方式3: 解析命令中的@用户名或用户ID
     const atUserMatch = commandText.match(/@(\w+)/);
-    if (atUserMatch) {
-        const username = atUserMatch[1];
-        const userInfo = await getUserByUsername(username);
+    const userIdMatch = commandText.match(/\b(\d{8,})\b/);
+    
+    if (atUserMatch || userIdMatch) {
+        const identifier = atUserMatch ? atUserMatch[1] : userIdMatch[1];
+        
+        // 通过新的getUserInfo函数获取用户信息
+        const userInfo = await getUserInfo(chatId, identifier);
         
         if (userInfo && userInfo.exists) {
-            target = { 
-                username: username, 
-                id: 'unknown',
-                first_name: userInfo.display_name 
+            target = {
+                id: userInfo.id,
+                username: userInfo.username,
+                first_name: userInfo.display_name
             };
-            targetUsername = `@${username}`;
+            targetUserId = userInfo.id ? userInfo.id.toString() : null;
             targetDisplayName = userInfo.display_name;
             
-            console.log(`🎯 通过@用户名选择目标: ${targetDisplayName}`);
-            return { target, targetUsername, targetDisplayName };
+            if (atUserMatch) {
+                console.log(`🎯 通过@用户名选择目标: ${targetDisplayName} (ID: ${targetUserId || '未知'})`);
+            } else {
+                console.log(`🎯 通过用户ID选择目标: ${targetDisplayName} (ID: ${targetUserId})`);
+            }
+            
+            return { 
+                target, 
+                targetUserId, 
+                targetDisplayName, 
+                isUsernameTarget: !userInfo.id && atUserMatch,
+                username: atUserMatch ? identifier : null
+            };
         } else {
-            console.log(`❌ 用户 @${username} 不存在或无法获取信息`);
+            if (atUserMatch) {
+                console.log(`❌ 用户 @${identifier} 不存在或无法获取信息`);
+            } else {
+                console.log(`❌ 用户ID ${identifier} 不存在或无法获取信息`);
+            }
             return null;
         }
     }
 
-    // 方式3: 检查是否是转发消息或包含用户信息的消息
+    // 方式4: 检查是否是转发消息或包含用户信息的消息
     if (message.forward_from) {
         const forwardUser = message.forward_from;
         target = forwardUser;
-        targetUsername = forwardUser.username ? `@${forwardUser.username}` : `user_${forwardUser.id}`;
+        targetUserId = forwardUser.id.toString();
         targetDisplayName = getUserDisplayName(forwardUser);
         
-        console.log(`🎯 通过转发消息选择目标: ${targetDisplayName}`);
-        return { target, targetUsername, targetDisplayName };
+        console.log(`🎯 通过转发消息选择目标: ${targetDisplayName} (ID: ${targetUserId})`);
+        return { target, targetUserId, targetDisplayName };
     }
 
-    // 方式4: 检查消息中的text_mention实体
+    // 方式5: 检查消息中的text_mention实体
     if (message.entities) {
         for (const entity of message.entities) {
             if (entity.type === 'text_mention' && entity.user) {
                 const mentionUser = entity.user;
                 target = mentionUser;
-                targetUsername = mentionUser.username ? `@${mentionUser.username}` : `user_${mentionUser.id}`;
+                targetUserId = mentionUser.id.toString();
                 targetDisplayName = getUserDisplayName(mentionUser);
                 
-                console.log(`🎯 通过文本提及选择目标: ${targetDisplayName}`);
-                return { target, targetUsername, targetDisplayName };
+                console.log(`🎯 通过文本提及选择目标: ${targetDisplayName} (ID: ${targetUserId})`);
+                return { target, targetUserId, targetDisplayName };
             }
         }
     }
@@ -426,15 +612,26 @@ bot.onText(/\/help/, async (msg) => {
 **🎯 击打高玩命令：**
 \`/hit\` - 击打回复消息中用户的高玩
 \`/hit @用户名\` - 击打指定用户的高玩
+\`/hit 用户ID\` - 通过用户ID击打高玩
 
 **📊 统计命令：**
 \`/stats\` - 查看自己的高玩受击统计
 \`/stats @用户名\` - 查看指定用户高玩受击统计
+\`/stats 用户ID\` - 通过用户ID查看统计
 \`/leaderboard\` - 查看高玩受击排行榜
 
 **🏆 成就系统：**
 \`/achievements\` - 查看自己的高玩成就
 \`/achievements @用户名\` - 查看指定用户高玩受击成就
+\`/achievements 用户ID\` - 通过用户ID查看成就
+
+**🔍 查询功能：**
+\`/query @用户名\` - 查询用户详细信息
+\`/query 用户ID\` - 通过用户ID查询信息
+\`/query\` (回复消息) - 查询回复用户的信息
+
+**⚙️ 管理命令：**
+\`/sync\` - 同步群组成员信息 (仅管理员)
 
 **ℹ️ 其他命令：**
 \`/start\` - 开始使用机器人
@@ -449,7 +646,8 @@ bot.onText(/\/help/, async (msg) => {
 **🎯 击打高玩方式：**
 1️⃣ **回复消息击打高玩：** 回复某人的消息，然后发送 \`/hit\`
 2️⃣ **用户名击打高玩：** 发送 \`/hit @用户名\`
-3️⃣ **转发击打高玩：** 转发某人的消息，然后发送 \`/hit\`
+3️⃣ **用户ID击打高玩：** 发送 \`/hit 用户ID\` (例如: \`/hit 123456789\`)
+4️⃣ **转发击打高玩：** 转发某人的消息，然后发送 \`/hit\`
 
 **✨ 特色功能：**
 • 🎲 随机高玩击打效果消息
@@ -457,12 +655,14 @@ bot.onText(/\/help/, async (msg) => {
 • 🎖️ 高玩成就解锁系统
 • 📈 高玩受击进度条和百分比
 • 🎊 特殊高玩里程碑庆祝
+• 🔄 自动同步用户ID和用户名信息
 
 **💡 使用技巧：**
 • 在群组中使用效果更佳
 • 可以击打任何有用户名用户的高玩
 • 高玩受击数据会永久保存
 • 支持多种用户选择方式
+• 机器人会自动同步和维护用户信息
 • ⚠️ **注意：** 不要试图攻击机器人，所有攻击都会反弹到你自己身上！
 
 开始你的高玩击打之旅吧！💪🎯
@@ -492,10 +692,12 @@ bot.onText(/\/hit(.*)/, async (msg, match) => {
 **请使用以下方式指定目标：**
 1️⃣ 回复某人的消息，然后发送 \`/hit\`
 2️⃣ 使用 \`/hit @用户名\`
-3️⃣ 转发某人的消息，然后发送 \`/hit\`
+3️⃣ 使用 \`/hit 用户ID\` (例如: \`/hit 123456789\`)
+4️⃣ 转发某人的消息，然后发送 \`/hit\`
 
 **示例：**
 \`/hit @username\` - 击打指定用户的高玩
+\`/hit 123456789\` - 通过用户ID击打高玩
 \`/hit\` (回复消息时) - 击打被回复用户的高玩
 
 找准目标再开火！🎯`;
@@ -504,10 +706,10 @@ bot.onText(/\/hit(.*)/, async (msg, match) => {
             return;
         }
 
-        const { target, targetUsername, targetDisplayName } = targetInfo;
+        const { target, targetUserId, targetDisplayName, isUsernameTarget, username } = targetInfo;
 
         // 防止自己击打自己的高玩
-        if (target.id === attacker.id || (target.username && target.username === attacker.username)) {
+        if (target.id === attacker.id) {
             const selfHitMessages = [
                 '😅 别闹了，你不能击打自己的高玩！',
                 '🤔 想要自虐高玩吗？这里不提供自我击打高玩服务哦！',
@@ -522,16 +724,17 @@ bot.onText(/\/hit(.*)/, async (msg, match) => {
 
         // 检查是否试图攻击机器人并实现反弹
         const botInfo = await bot.getMe();
-        if (target.id === botInfo.id || (target.username && target.username === botInfo.username)) {
+        if (target.id === botInfo.id) {
             // 攻击反弹 - 攻击者成为被攻击目标
-            const attackerUsername = attacker.username ? `@${attacker.username}` : `user_${attacker.id}`;
+            const attackerUserId = attacker.id.toString();
             const attackerDisplayName = getUserDisplayName(attacker);
+            const attackerUsername = attacker.username;
             
             // 记录反击成就（如果是首次）
-            const isFirstBounce = await dataManager.recordBounceAchievement(attackerUsername, attackerDisplayName);
+            const isFirstBounce = await dataManager.recordBounceAchievement(attackerUserId, attackerDisplayName, attackerUsername);
             
             // 正常击打攻击者
-            const hitCount = await dataManager.hitUser(attackerUsername, attackerDisplayName);
+            const hitCount = await dataManager.hitUser(attackerUserId, attackerDisplayName, attackerUsername);
             
             const bounceMessages = [
                 '🛡️ **攻击反弹！** 机器人启动了防护系统！',
@@ -561,7 +764,20 @@ bot.onText(/\/hit(.*)/, async (msg, match) => {
 
         // 记录击打高玩
         const attackerName = getUserDisplayName(attacker);
-        const hitCount = await dataManager.hitUser(targetUsername, targetDisplayName);
+        let finalTargetUserId = targetUserId;
+        let finalTargetUsername = null;
+        
+        // 处理用户名击打的特殊情况
+        if (isUsernameTarget && !targetUserId) {
+            // 这是一个新的用户名击打，我们需要创建一个临时的用户记录
+            // 但是由于没有真实的用户ID，我们使用用户名作为标识符
+            finalTargetUserId = `username_${username.toLowerCase()}`;
+            finalTargetUsername = username;
+        } else if (target.username) {
+            finalTargetUsername = target.username;
+        }
+        
+        const hitCount = await dataManager.hitUser(finalTargetUserId, targetDisplayName, finalTargetUsername);
         
         // 生成击打高玩消息
         const hitMessage = getRandomHitMessage(attackerName, targetDisplayName);
@@ -594,7 +810,7 @@ bot.onText(/\/hit(.*)/, async (msg, match) => {
 bot.onText(/\/stats(.*)/, async (msg, match) => {
     const chatId = msg.chat.id;
     const commandText = match[1] || ''; // 获取/stats后面的内容
-    let targetUsername = null;
+    let targetUserId = null;
     let targetDisplayName = null;
 
     // 检查群聊限制
@@ -612,30 +828,49 @@ bot.onText(/\/stats(.*)/, async (msg, match) => {
         const atUserMatch = commandText.match(/@(\w+)/);
         if (atUserMatch) {
             const username = atUserMatch[1];
-            const userInfo = await getUserByUsername(username);
-            
-            if (userInfo && userInfo.exists) {
-                targetUsername = `@${username}`;
-                targetDisplayName = userInfo.display_name;
+            // 在现有数据中查找用户ID
+            const existingUserId = dataManager.findUserIdByUsername(username);
+            if (existingUserId) {
+                targetUserId = existingUserId;
+                targetDisplayName = dataManager.data.hitData[existingUserId].name;
             } else {
-                bot.sendMessage(chatId, `❌ 找不到用户 @${username} 的信息！`);
+                // 尝试用户名标识符
+                const usernameId = `username_${username.toLowerCase()}`;
+                if (dataManager.data.hitData[usernameId]) {
+                    targetUserId = usernameId;
+                    targetDisplayName = dataManager.data.hitData[usernameId].name;
+                } else {
+                    bot.sendMessage(chatId, `❌ 找不到用户 @${username} 的击打记录！`);
+                    return;
+                }
+            }
+        }
+        // 检查是否指定了用户ID
+        else if (commandText.match(/\b(\d{8,})\b/)) {
+            const userIdMatch = commandText.match(/\b(\d{8,})\b/);
+            const userId = userIdMatch[1];
+            if (dataManager.data.hitData[userId]) {
+                targetUserId = userId;
+                targetDisplayName = dataManager.data.hitData[userId].name;
+            } else {
+                bot.sendMessage(chatId, `❌ 找不到用户ID ${userId} 的击打记录！`);
                 return;
             }
-        } 
+        }
         // 检查是否回复了某人的消息
         else if (msg.reply_to_message && msg.reply_to_message.from) {
             const replyUser = msg.reply_to_message.from;
-            targetUsername = replyUser.username ? `@${replyUser.username}` : `user_${replyUser.id}`;
+            targetUserId = replyUser.id.toString();
             targetDisplayName = getUserDisplayName(replyUser);
         }
         // 如果没有指定用户，显示发送者的统计
         else {
             const user = msg.from;
-            targetUsername = user.username ? `@${user.username}` : `user_${user.id}`;
+            targetUserId = user.id.toString();
             targetDisplayName = getUserDisplayName(user);
         }
 
-        const hitCount = dataManager.getUserHitCount(targetUsername);
+        const hitCount = dataManager.getUserHitCount(targetUserId);
         
         // 根据高玩击打次数生成不同的统计消息
         let statusEmoji = '';
@@ -664,6 +899,7 @@ bot.onText(/\/stats(.*)/, async (msg, match) => {
         const statsMessage = `📊 **高玩击打统计报告**
 
 👤 **目标：** ${escapeMarkdown(targetDisplayName)}
+🆔 **用户ID：** \`${targetUserId}\`
 🎯 **高玩被击打次数：** **${hitCount}** 次
 ${statusEmoji} **状态：** ${statusText}
 
@@ -714,7 +950,7 @@ bot.onText(/\/leaderboard/, async (msg) => {
         // 计算总高玩击打次数
         const totalHits = leaderboard.reduce((sum, [, data]) => sum + data.count, 0);
         
-        leaderboard.forEach(([username, data], index) => {
+        leaderboard.forEach(([userId, data], index) => {
             const rank = index + 1;
             let medal = '';
             let prefix = '';
@@ -751,8 +987,15 @@ bot.onText(/\/leaderboard/, async (msg) => {
             const filledLength = Math.round((data.count / leaderboard[0][1].count) * barLength);
             const progressBar = '█'.repeat(filledLength) + '▒'.repeat(barLength - filledLength);
             
-            message += `${medal} ${prefix}${escapeMarkdown(data.name)}\n`;
+            // 显示用户信息，包含用户名（如果有的话）
+            let userDisplay = escapeMarkdown(data.name);
+            if (data.username) {
+                userDisplay += ` (@${data.username})`;
+            }
+            
+            message += `${medal} ${prefix}${userDisplay}\n`;
             message += `   🎯 高玩被击打 **${data.count}** 次 (${percentage}%)${rankText}\n`;
+            message += `   🆔 ID: \`${userId}\`\n`;
             message += `   \`${progressBar}\`\n\n`;
         });
 
@@ -774,7 +1017,7 @@ bot.onText(/\/leaderboard/, async (msg) => {
 bot.onText(/\/achievements(.*)/, async (msg, match) => {
     const chatId = msg.chat.id;
     const commandText = match[1] || '';
-    let targetUsername = null;
+    let targetUserId = null;
     let targetDisplayName = null;
 
     // 检查群聊限制
@@ -792,34 +1035,53 @@ bot.onText(/\/achievements(.*)/, async (msg, match) => {
         const atUserMatch = commandText.match(/@(\w+)/);
         if (atUserMatch) {
             const username = atUserMatch[1];
-            const userInfo = await getUserByUsername(username);
-            
-            if (userInfo && userInfo.exists) {
-                targetUsername = `@${username}`;
-                targetDisplayName = userInfo.display_name;
+            // 在现有数据中查找用户ID
+            const existingUserId = dataManager.findUserIdByUsername(username);
+            if (existingUserId) {
+                targetUserId = existingUserId;
+                targetDisplayName = dataManager.data.hitData[existingUserId].name;
             } else {
-                bot.sendMessage(chatId, `❌ 找不到用户 @${username} 的信息！`);
+                // 尝试用户名标识符
+                const usernameId = `username_${username.toLowerCase()}`;
+                if (dataManager.data.hitData[usernameId]) {
+                    targetUserId = usernameId;
+                    targetDisplayName = dataManager.data.hitData[usernameId].name;
+                } else {
+                    bot.sendMessage(chatId, `❌ 找不到用户 @${username} 的击打记录！`);
+                    return;
+                }
+            }
+        }
+        // 检查是否指定了用户ID
+        else if (commandText.match(/\b(\d{8,})\b/)) {
+            const userIdMatch = commandText.match(/\b(\d{8,})\b/);
+            const userId = userIdMatch[1];
+            if (dataManager.data.hitData[userId]) {
+                targetUserId = userId;
+                targetDisplayName = dataManager.data.hitData[userId].name;
+            } else {
+                bot.sendMessage(chatId, `❌ 找不到用户ID ${userId} 的击打记录！`);
                 return;
             }
-        } 
+        }
         // 检查是否回复了某人的消息
         else if (msg.reply_to_message && msg.reply_to_message.from) {
             const replyUser = msg.reply_to_message.from;
-            targetUsername = replyUser.username ? `@${replyUser.username}` : `user_${replyUser.id}`;
+            targetUserId = replyUser.id.toString();
             targetDisplayName = getUserDisplayName(replyUser);
         }
         // 如果没有指定用户，显示发送者的高玩成就
         else {
             const user = msg.from;
-            targetUsername = user.username ? `@${user.username}` : `user_${user.id}`;
+            targetUserId = user.id.toString();
             targetDisplayName = getUserDisplayName(user);
         }
 
-        const hitCount = dataManager.getUserHitCount(targetUsername);
+        const hitCount = dataManager.getUserHitCount(targetUserId);
         const leaderboard = dataManager.getLeaderboard(100);
         
         // 找到用户在高玩排行榜中的位置
-        const userRank = leaderboard.findIndex(([username]) => username === targetUsername) + 1;
+        const userRank = leaderboard.findIndex(([userId]) => userId === targetUserId) + 1;
         
         // 计算高玩成就
         const achievements = [];
@@ -839,12 +1101,13 @@ bot.onText(/\/achievements(.*)/, async (msg, match) => {
         if (userRank > 0 && userRank <= 10) achievements.push('🏅 高玩前十常客 - 进入高玩受击排行榜前10名');
         
         // 检查反击成就
-        if (dataManager.hasBounceAchievement(targetUsername)) {
+        if (dataManager.hasBounceAchievement(targetUserId)) {
             achievements.push('🛡️ 机器人挑战者 - 试图攻击机器人但被反弹');
         }
 
         let message = `🏆 **高玩受击成就报告**\n\n`;
         message += `👤 **目标：** ${escapeMarkdown(targetDisplayName)}\n`;
+        message += `🆔 **用户ID：** \`${targetUserId}\`\n`;
         message += `🎯 **高玩被击打次数：** **${hitCount}** 次\n`;
         message += `📊 **高玩受击排行榜排名：** ${userRank > 0 ? `第 **${userRank}** 名` : '未上榜'}\n\n`;
 
@@ -874,151 +1137,98 @@ bot.onText(/\/achievements(.*)/, async (msg, match) => {
     }
 });
 
-// 检查是否为群聊
-function isGroupChat(chatType) {
-    return chatType === 'group' || chatType === 'supergroup';
-}
-
-// 群聊命令限制检查
-function checkGroupCommandRestriction(msg, commandName) {
-    if (isGroupChat(msg.chat.type) && commandName !== '/hit') {
-        const botUsername = process.env.BOT_USERNAME || 'hitball_bot';
-        const restrictedMessage = `🚫 **群聊限制**
-
-为了保持群聊的简洁，在群聊中只能使用 \`/hit\` 命令。
-
-**其他命令请私聊机器人使用：**
-• \`/stats\` - 查看击打统计
-• \`/leaderboard\` - 查看排行榜  
-• \`/achievements\` - 查看成就
-• \`/help\` - 获取帮助
-
-💬 **开始私聊：** 点击 [@${botUsername}](https://t.me/${botUsername}) 或搜索机器人用户名！`;
-        
-        bot.sendMessage(msg.chat.id, restrictedMessage, { 
-            parse_mode: 'Markdown',
-            disable_web_page_preview: true 
-        });
-        return false;
-    }
-    return true;
-}
-
-// 速率限制检查
-async function checkRateLimit(msg, commandType = 'command') {
-    const userId = msg.from.id;
+// 查询用户信息命令
+bot.onText(/\/query(?:\s+(.+))?/, async (msg, match) => {
     const chatId = msg.chat.id;
-    
-    if (rateLimitManager.isOnCooldown(userId, commandType)) {
-        // 记录违规并检查是否需要禁言
-        const violationCount = rateLimitManager.recordViolation(userId);
-        
-        if (violationCount >= rateLimitManager.maxViolations) {
-            // 达到最大违规次数，尝试禁言用户
-            if (isGroupChat(msg.chat.type)) {
-                try {
-                    await bot.restrictChatMember(chatId, userId, {
-                        until_date: Math.floor(Date.now() / 1000) + rateLimitManager.muteTime,
-                        permissions: {
-                            can_send_messages: false,
-                            can_send_media_messages: false,
-                            can_send_polls: false,
-                            can_send_other_messages: false,
-                            can_add_web_page_previews: false,
-                            can_change_info: false,
-                            can_invite_users: false,
-                            can_pin_messages: false
-                        }
-                    });
-                    
-                    console.log(`🔇 用户 ${userId} 因连续违规 ${violationCount} 次被禁言 ${rateLimitManager.muteTime} 秒`);
-                    
-                    // 重置违规计数
-                    rateLimitManager.resetViolations(userId);
-                    
-                } catch (error) {
-                    console.error('❌ 禁言用户失败:', error);
-                    // 如果禁言失败，可能是权限不足，继续执行但记录错误
-                }
-            }
-        }
-        
-        return false;
-    }
-    
-    rateLimitManager.setCooldown(userId, commandType);
-    return true;
-}
-
-// 管理员命令 - 查看速率限制状态（调试用）
-bot.onText(/\/ratelimit/, async (msg) => {
-    const chatId = msg.chat.id;
-    const userId = msg.from.id;
     
     // 检查群聊限制
-    if (!checkGroupCommandRestriction(msg, '/ratelimit')) {
+    if (!checkGroupCommandRestriction(msg, '/query')) {
         return;
     }
     
-    const hitCooldown = rateLimitManager.getRemainingCooldown(userId, 'hit');
-    const commandCooldown = rateLimitManager.getRemainingCooldown(userId, 'command');
-    
-    let message = `⏱️ **速率限制状态**\n\n`;
-    message += `👤 **用户：** ${getUserDisplayName(msg.from)}\n\n`;
-    
-    if (hitCooldown > 0) {
-        message += `🎯 **击打冷却：** ${hitCooldown} 秒\n`;
-    } else {
-        message += `🎯 **击打冷却：** ✅ 可用\n`;
+    // 检查速率限制
+    if (!(await checkRateLimit(msg, 'command'))) {
+        return;
     }
     
-    if (commandCooldown > 0) {
-        message += `⚙️ **命令冷却：** ${commandCooldown} 秒\n`;
-    } else {
-        message += `⚙️ **命令冷却：** ✅ 可用\n`;
-    }
+    const query = match[1]?.trim();
     
-    message += `\n📊 **冷却时间设置：**\n`;
-    message += `• 击打命令：${rateLimitManager.hitCooldown / 1000} 秒\n`;
-    message += `• 其他命令：${rateLimitManager.commandCooldown / 1000} 秒`;
-    
-    bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-});
+    if (!query) {
+        const message = `
+📋 **用户查询命令**
 
-// 启动机器人
-async function startBot() {
-    console.log('🚀 正在启动击打高玩机器人...');
+**使用方法：**
+• \`/query @用户名\` - 通过用户名查询
+• \`/query 123456789\` - 通过用户ID查询
+• 回复某条消息 + \`/query\` - 查询回复的用户
+
+**示例：**
+• \`/query @张三\`
+• \`/query 123456789\`
+        `;
+        bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+        return;
+    }
     
     try {
-        // 加载数据
-        await dataManager.loadData();
+        let userInfo = null;
+        let targetUserId = null;
         
-        // 获取机器人信息
-        const botInfo = await bot.getMe();
-        console.log(`✅ 击打高玩机器人启动成功！`);
-        console.log(`🤖 机器人名称: ${botInfo.first_name}`);
-        console.log(`👤 用户名: @${botInfo.username}`);
-        console.log(`🆔 机器人ID: ${botInfo.id}`);
-        console.log('📡 开始监听消息...');
+        // 检查是否回复了某人的消息
+        if (msg.reply_to_message && msg.reply_to_message.from) {
+            const replyUser = msg.reply_to_message.from;
+            targetUserId = replyUser.id.toString();
+            userInfo = {
+                id: replyUser.id,
+                username: replyUser.username,
+                display_name: getUserDisplayName(replyUser),
+                exists: true
+            };
+            
+            // 同步用户信息
+            await dataManager.syncUserInfo(targetUserId, userInfo.display_name, replyUser.username);
+        } else {
+            // 通过参数查询
+            userInfo = await getUserInfo(chatId, query);
+            targetUserId = userInfo?.id?.toString();
+        }
+        
+        if (!userInfo || !userInfo.exists) {
+            bot.sendMessage(chatId, `❌ 未找到用户：${query}`);
+            return;
+        }
+        
+        // 获取用户数据
+        const hitCount = dataManager.getUserHitCount(targetUserId);
+        const hasBounceAchievement = dataManager.hasBounceAchievement(targetUserId);
+        const userData = dataManager.data.hitData[targetUserId];
+        
+        let message = `👤 **用户信息查询**\n\n`;
+        message += `**🆔 用户ID：** \`${userInfo.id}\`\n`;
+        message += `**📝 显示名称：** ${userInfo.display_name}\n`;
+        
+        if (userInfo.username) {
+            message += `**👤 用户名：** @${userInfo.username}\n`;
+        }
+        
+        message += `\n**📊 统计信息：**\n`;
+        message += `• 🎯 高玩被击打次数：${hitCount}\n`;
+        message += `• 🏆 反击成就：${hasBounceAchievement ? '✅ 已解锁' : '❌ 未解锁'}\n`;
+        
+        if (userData?.firstHitDate) {
+            const firstHitDate = new Date(userData.firstHitDate).toLocaleString('zh-CN');
+            message += `• 📅 首次被击打：${firstHitDate}\n`;
+        }
+        
+        if (userData?.lastHitDate) {
+            const lastHitDate = new Date(userData.lastHitDate).toLocaleString('zh-CN');
+            message += `• 🕒 最后被击打：${lastHitDate}\n`;
+        }
+        
+        bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
         
     } catch (error) {
-        console.error('❌ 启动击打高玩机器人时出错:', error);
-        process.exit(1);
+        console.error('查询用户信息时出错:', error);
+        bot.sendMessage(chatId, '❌ 查询失败，请稍后重试。');
     }
-}
-
-// 优雅关闭
-process.on('SIGINT', () => {
-    console.log('\n🛑 正在关闭击打高玩机器人...');
-    bot.stopPolling();
-    process.exit(0);
 });
-
-process.on('SIGTERM', () => {
-    console.log('\n🛑 正在关闭击打高玩机器人...');
-    bot.stopPolling();
-    process.exit(0);
-});
-
-// 启动击打高玩机器人
-startBot();
