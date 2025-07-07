@@ -433,21 +433,7 @@ async function parseHitTarget(message, commandText) {
         return { target, targetUserId, targetDisplayName };
     }
 
-    // 方式2: 检查是否转发了某人的消息
-    if (message.forward_from) {
-        const forwardUser = message.forward_from;
-        target = forwardUser;
-        targetUserId = forwardUser.id.toString();
-        targetDisplayName = getUserDisplayName(forwardUser);
-        
-        // 自动同步用户信息
-        await dataManager.syncUserInfo(targetUserId, targetDisplayName, forwardUser.username);
-        
-        console.log(`🎯 通过转发消息选择目标: ${targetDisplayName} (ID: ${targetUserId})`);
-        return { target, targetUserId, targetDisplayName };
-    }
-
-    // 方式3: 解析命令中的@用户名或用户ID
+    // 方式2: 解析命令中的@用户名或用户ID
     const atUserMatch = commandText.match(/@(\w+)/);
     const userIdMatch = commandText.match(/\b(\d{8,})\b/);
     
@@ -489,18 +475,7 @@ async function parseHitTarget(message, commandText) {
         }
     }
 
-    // 方式4: 检查是否是转发消息或包含用户信息的消息
-    if (message.forward_from) {
-        const forwardUser = message.forward_from;
-        target = forwardUser;
-        targetUserId = forwardUser.id.toString();
-        targetDisplayName = getUserDisplayName(forwardUser);
-        
-        console.log(`🎯 通过转发消息选择目标: ${targetDisplayName} (ID: ${targetUserId})`);
-        return { target, targetUserId, targetDisplayName };
-    }
-
-    // 方式5: 检查消息中的text_mention实体
+    // 方式3: 检查消息中的text_mention实体
     if (message.entities) {
         for (const entity of message.entities) {
             if (entity.type === 'text_mention' && entity.user) {
@@ -601,6 +576,7 @@ bot.onText(/\/help/, async (msg) => {
         return;
     }
     
+
     // 检查速率限制
     if (!(await checkRateLimit(msg, 'command'))) {
         return;
@@ -647,7 +623,6 @@ bot.onText(/\/help/, async (msg) => {
 1️⃣ **回复消息击打高玩：** 回复某人的消息，然后发送 \`/hit\`
 2️⃣ **用户名击打高玩：** 发送 \`/hit @用户名\`
 3️⃣ **用户ID击打高玩：** 发送 \`/hit 用户ID\` (例如: \`/hit 123456789\`)
-4️⃣ **转发击打高玩：** 转发某人的消息，然后发送 \`/hit\`
 
 **✨ 特色功能：**
 • 🎲 随机高玩击打效果消息
@@ -693,7 +668,6 @@ bot.onText(/\/hit(.*)/, async (msg, match) => {
 1️⃣ 回复某人的消息，然后发送 \`/hit\`
 2️⃣ 使用 \`/hit @用户名\`
 3️⃣ 使用 \`/hit 用户ID\` (例如: \`/hit 123456789\`)
-4️⃣ 转发某人的消息，然后发送 \`/hit\`
 
 **示例：**
 \`/hit @username\` - 击打指定用户的高玩
@@ -1232,3 +1206,238 @@ bot.onText(/\/query(?:\s+(.+))?/, async (msg, match) => {
         bot.sendMessage(chatId, '❌ 查询失败，请稍后重试。');
     }
 });
+
+// 全局消息监听器 - 自动同步用户信息
+bot.on('message', async (msg) => {
+    // 跳过群聊的非命令消息以避免过多处理
+    if (msg.chat.type !== 'private' && !msg.text?.startsWith('/')) {
+        return;
+    }
+    
+    // 自动同步发送者信息
+    if (msg.from && !msg.from.is_bot) {
+        const userId = msg.from.id.toString();
+        const displayName = getUserDisplayName(msg.from);
+        const username = msg.from.username || null;
+        
+        try {
+            await dataManager.syncUserInfo(userId, displayName, username);
+        } catch (error) {
+            console.log(`⚠️ 同步用户信息失败 (${userId}):`, error.message);
+        }
+    }
+    
+    // 如果是回复消息，也同步被回复用户的信息
+    if (msg.reply_to_message && msg.reply_to_message.from && !msg.reply_to_message.from.is_bot) {
+        const replyUserId = msg.reply_to_message.from.id.toString();
+        const replyDisplayName = getUserDisplayName(msg.reply_to_message.from);
+        const replyUsername = msg.reply_to_message.from.username || null;
+        
+        try {
+            await dataManager.syncUserInfo(replyUserId, replyDisplayName, replyUsername);
+        } catch (error) {
+            console.log(`⚠️ 同步回复用户信息失败 (${replyUserId}):`, error.message);
+        }
+    }
+});
+
+// 新成员加入群聊时自动同步信息
+bot.on('new_chat_members', async (msg) => {
+    if (msg.new_chat_members) {
+        for (const newMember of msg.new_chat_members) {
+            if (!newMember.is_bot) {
+                const userId = newMember.id.toString();
+                const displayName = getUserDisplayName(newMember);
+                const username = newMember.username || null;
+                
+                try {
+                    await dataManager.syncUserInfo(userId, displayName, username);
+                    console.log(`✅ 新成员信息已同步: ${displayName} (ID: ${userId})`);
+                } catch (error) {
+                    console.log(`⚠️ 同步新成员信息失败 (${userId}):`, error.message);
+                }
+            }
+        }
+    }
+});
+
+// 添加管理员命令 - 手动同步群组成员信息
+bot.onText(/\/sync/, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    
+    // 检查是否为群聊管理员（简单检查，可以根据需要增强）
+    if (msg.chat.type === 'private') {
+        bot.sendMessage(chatId, '❌ 此命令只能在群聊中使用。');
+        return;
+    }
+    
+    try {
+        // 检查用户是否为管理员
+        const member = await bot.getChatMember(chatId, userId);
+        if (member.status !== 'administrator' && member.status !== 'creator') {
+            bot.sendMessage(chatId, '❌ 只有群聊管理员可以使用此命令。');
+            return;
+        }
+        
+        bot.sendMessage(chatId, '🔄 开始同步群组成员信息...');
+        
+        // 执行同步
+        await dataManager.syncAllChatMembers(chatId);
+        
+        bot.sendMessage(chatId, '✅ 群组成员信息同步完成！');
+        
+    } catch (error) {
+        console.error('同步群组成员信息时出错:', error);
+        bot.sendMessage(chatId, '❌ 同步失败，请稍后重试。');
+    }
+});
+
+// 检查是否为群聊
+function isGroupChat(chatType) {
+    return chatType === 'group' || chatType === 'supergroup';
+}
+
+// 群聊命令限制检查
+function checkGroupCommandRestriction(msg, commandName) {
+    if (isGroupChat(msg.chat.type) && commandName !== '/hit') {
+        const botUsername = process.env.BOT_USERNAME || 'hitball_bot';
+        const restrictedMessage = `🚫 **群聊限制**
+
+为了保持群聊的简洁，在群聊中只能使用 \`/hit\` 命令。
+
+**其他命令请私聊机器人使用：**
+• \`/stats\` - 查看击打统计
+• \`/leaderboard\` - 查看排行榜  
+• \`/achievements\` - 查看成就
+• \`/help\` - 获取帮助
+
+💬 **开始私聊：** 点击 [@${botUsername}](https://t.me/${botUsername}) 或搜索机器人用户名！`;
+        
+        bot.sendMessage(msg.chat.id, restrictedMessage, { 
+            parse_mode: 'Markdown',
+            disable_web_page_preview: true 
+        });
+        return false;
+    }
+    return true;
+}
+
+// 速率限制检查
+async function checkRateLimit(msg, commandType = 'command') {
+    const userId = msg.from.id;
+    const chatId = msg.chat.id;
+    
+    if (rateLimitManager.isOnCooldown(userId, commandType)) {
+        // 记录违规并检查是否需要禁言
+        const violationCount = rateLimitManager.recordViolation(userId);
+        
+        if (violationCount >= rateLimitManager.maxViolations) {
+            // 达到最大违规次数，尝试禁言用户
+            if (isGroupChat(msg.chat.type)) {
+                try {
+                    await bot.restrictChatMember(chatId, userId, {
+                        until_date: Math.floor(Date.now() / 1000) + rateLimitManager.muteTime,
+                        permissions: {
+                            can_send_messages: false,
+                            can_send_media_messages: false,
+                            can_send_polls: false,
+                            can_send_other_messages: false,
+                            can_add_web_page_previews: false,
+                            can_change_info: false,
+                            can_invite_users: false,
+                            can_pin_messages: false
+                        }
+                    });
+                    
+                    console.log(`🔇 用户 ${userId} 因连续违规 ${violationCount} 次被禁言 ${rateLimitManager.muteTime} 秒`);
+                    
+                    // 重置违规计数
+                    rateLimitManager.resetViolations(userId);
+                    
+                } catch (error) {
+                    console.error('❌ 禁言用户失败:', error);
+                    // 如果禁言失败，可能是权限不足，继续执行但记录错误
+                }
+            }
+        }
+        
+        return false;
+    }
+    
+    rateLimitManager.setCooldown(userId, commandType);
+    return true;
+}
+
+// 管理员命令 - 查看速率限制状态（调试用）
+bot.onText(/\/ratelimit/, async (msg) => {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    
+    // 检查群聊限制
+    if (!checkGroupCommandRestriction(msg, '/ratelimit')) {
+        return;
+    }
+    
+    const hitCooldown = rateLimitManager.getRemainingCooldown(userId, 'hit');
+    const commandCooldown = rateLimitManager.getRemainingCooldown(userId, 'command');
+    
+    let message = `⏱️ **速率限制状态**\n\n`;
+    message += `👤 **用户：** ${getUserDisplayName(msg.from)}\n\n`;
+    
+    if (hitCooldown > 0) {
+        message += `🎯 **击打冷却：** ${hitCooldown} 秒\n`;
+    } else {
+        message += `🎯 **击打冷却：** ✅ 可用\n`;
+    }
+    
+    if (commandCooldown > 0) {
+        message += `⚙️ **命令冷却：** ${commandCooldown} 秒\n`;
+    } else {
+        message += `⚙️ **命令冷却：** ✅ 可用\n`;
+    }
+    
+    message += `\n📊 **冷却时间设置：**\n`;
+    message += `• 击打命令：${rateLimitManager.hitCooldown / 1000} 秒\n`;
+    message += `• 其他命令：${rateLimitManager.commandCooldown / 1000} 秒`;
+    
+    bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+});
+
+// 启动机器人
+async function startBot() {
+    console.log('🚀 正在启动击打高玩机器人...');
+    
+    try {
+        // 加载数据
+        await dataManager.loadData();
+        
+        // 获取机器人信息
+        const botInfo = await bot.getMe();
+        console.log(`✅ 击打高玩机器人启动成功！`);
+        console.log(`🤖 机器人名称: ${botInfo.first_name}`);
+        console.log(`👤 用户名: @${botInfo.username}`);
+        console.log(`🆔 机器人ID: ${botInfo.id}`);
+        console.log('📡 开始监听消息...');
+        
+    } catch (error) {
+        console.error('❌ 启动击打高玩机器人时出错:', error);
+        process.exit(1);
+    }
+}
+
+// 优雅关闭
+process.on('SIGINT', () => {
+    console.log('\n🛑 正在关闭击打高玩机器人...');
+    bot.stopPolling();
+    process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+    console.log('\n🛑 正在关闭击打高玩机器人...');
+    bot.stopPolling();
+    process.exit(0);
+});
+
+// 启动击打高玩机器人
+startBot();
